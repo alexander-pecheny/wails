@@ -41,3 +41,14 @@ jobs:
           # The runner's AppArmor forbids the user namespaces WebKit's sandbox needs.
           WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
         timeout-minutes: 5
+      - name: Session test
+        if: runner.os != 'Linux'
+        shell: bash
+        run: go run ./test/manual/webview-panel-session set && go run ./test/manual/webview-panel-session check
+        timeout-minutes: 5
+      - name: Session test (Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go run ./test/manual/webview-panel-session set && xvfb-run -a go run ./test/manual/webview-panel-session check
+        env:
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
+        timeout-minutes: 5
