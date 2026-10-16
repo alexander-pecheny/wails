@@ -1,0 +1,40 @@
+name: WebviewPanel v3
+
+on:
+  push:
+    branches: [webview-panel]
+  workflow_dispatch:
+
+jobs:
+  panel:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: v3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: v3/go.mod
+          cache-dependency-path: v3/go.sum
+      - name: Install GTK4 and WebKitGTK
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev xvfb
+      - name: Build
+        run: go build ./pkg/application/ ./examples/webview-panel/ ./test/manual/webview-panel/
+      - name: Vet
+        run: go vet -unsafeptr=false ./pkg/application/
+      - name: Unit tests
+        run: go test -race -count=1 -run Panel ./pkg/application/
+      - name: Smoke test
+        if: runner.os != 'Linux'
+        run: go run ./test/manual/webview-panel
+        timeout-minutes: 5
+      - name: Smoke test (Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go run ./test/manual/webview-panel
+        timeout-minutes: 5
