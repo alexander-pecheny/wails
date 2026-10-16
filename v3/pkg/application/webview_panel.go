@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -117,6 +120,17 @@ func NewPanel(options WebviewPanelOptions) *WebviewPanel {
 			options.URL = normalizedURL
 		} else {
 			options.URL = ""
+		}
+	}
+
+	if !credentialsSafeFor(options.URL) {
+		for key := range options.Headers {
+			if isCredentialHeader(key) {
+				delete(options.Headers, key)
+				if globalApplication != nil {
+					globalApplication.warning("panel %q: header %s is dropped for a non-https URL", options.Name, key)
+				}
+			}
 		}
 	}
 
@@ -341,11 +355,13 @@ func (p *WebviewPanel) Destroy() {
 	p.destroyed = true
 	impl := p.impl
 	p.destroyedLock.Unlock()
-	if impl != nil {
-		InvokeSync(func() { p.destroyNative(impl) })
-	}
+	// Unregister first, so a NewPanel with the same name made while the native
+	// view is torn down gets a fresh panel rather than this dying one.
 	if p.parent != nil {
 		p.parent.removePanel(p.id)
+	}
+	if impl != nil {
+		InvokeSync(func() { p.destroyNative(impl) })
 	}
 }
 
@@ -517,24 +533,40 @@ func (p *WebviewPanel) FillBeside(refPanel *WebviewPanel, direction string) *Web
 // Anchor/Responsive Layout Methods
 // =========================================================================
 
-// initializeAnchor stores the original window size for anchor calculations.
-// This is called when the panel is first attached to a window.
+// initializeAnchor runs when the native panel is created. Bounds given before
+// the window existed were relative to the configured size, which the real
+// content area may differ from (a maximised or clamped window), so anchored
+// bounds are recomputed against the real one.
 func (p *WebviewPanel) initializeAnchor() {
 	if p.parent == nil {
 		return
 	}
 	width, height := p.parentSize()
 	p.destroyedLock.Lock()
-	p.originalWindowWidth, p.originalWindowHeight = width, height
+	if p.originalWindowWidth == 0 || p.originalWindowHeight == 0 {
+		p.originalWindowWidth, p.originalWindowHeight = width, height
+	}
+	anchored := p.options.Anchor != AnchorNone
 	p.destroyedLock.Unlock()
+	if anchored {
+		bounds := p.calculateAnchoredBounds(width, height)
+		p.destroyedLock.Lock()
+		p.options.X, p.options.Y = bounds.X, bounds.Y
+		p.options.Width, p.options.Height = bounds.Width, bounds.Height
+		p.destroyedLock.Unlock()
+	}
 }
 
 // handleWindowResize recalculates the panel's bounds based on its anchor settings.
 // This is called automatically when the parent window is resized.
-func (p *WebviewPanel) handleWindowResize(newWindowWidth, newWindowHeight int) {
+func (p *WebviewPanel) handleWindowResize() {
 	if p.isDestroyed() {
 		return
 	}
+	p.resizeTo(p.parentSize())
+}
+
+func (p *WebviewPanel) resizeTo(newWindowWidth, newWindowHeight int) {
 	options := p.snapshotOptions()
 	if options.Anchor == AnchorNone {
 		// A DPI change still requires rescaling an absolutely positioned child.
@@ -657,12 +689,24 @@ func (p *WebviewPanel) withImpl(fn func(webviewPanelImpl)) {
 	})
 }
 
-// parentSize uses the configured content size before the native window exists.
+// parentSize is the size of the area panels are laid out in: the window's
+// content area, without title bar, frame or menu bar. Before the native window
+// exists it is the configured size.
 func (p *WebviewPanel) parentSize() (int, int) {
-	if p.parent.impl == nil {
-		return p.parent.options.Width, p.parent.options.Height
+	return p.parent.panelArea()
+}
+
+func (w *WebviewWindow) panelArea() (int, int) {
+	if w.impl == nil {
+		return w.options.Width, w.options.Height
 	}
-	return p.parent.Size()
+	width, height := w.Size()
+	InvokeSync(func() {
+		if aw, ah, ok := panelAreaSize(w); ok {
+			width, height = aw, ah
+		}
+	})
+	return width, height
 }
 
 // sortedSiblings snapshots stacking keys before sorting so concurrent setters
@@ -680,4 +724,53 @@ func (p *WebviewPanel) sortedSiblings() []*WebviewPanel {
 		return keys[panels[i].id] < keys[panels[j].id]
 	})
 	return panels
+}
+
+// refused reports whether a request must not reach the asset server. A panel
+// page never gets the Wails runtime, and a page from another origin never
+// reaches the application's assets at all.
+func (r *webViewAssetRequest) refused() bool {
+	if r.foreignDocument {
+		return true
+	}
+	if !r.panel {
+		return false
+	}
+	raw, err := r.Request.URL()
+	if err != nil {
+		return true
+	}
+	u, err := url.Parse(raw)
+	return err != nil || strings.HasPrefix(u.Path, "/wails/")
+}
+
+func refuse(r *webViewAssetRequest) {
+	rw := r.Request.Response()
+	rw.WriteHeader(http.StatusForbidden)
+	_ = rw.Finish()
+	_ = r.Request.Close()
+}
+
+func isCredentialHeader(key string) bool {
+	switch http.CanonicalHeaderKey(key) {
+	case "Authorization", "Proxy-Authorization", "Cookie":
+		return true
+	}
+	return false
+}
+
+// credentialsSafeFor reports whether credentials can be sent to raw: only over
+// https or to the application's own assets.
+func credentialsSafeFor(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "https", "wails":
+		return true
+	case "http":
+		return u.Hostname() == "wails.localhost"
+	}
+	return false
 }

@@ -77,3 +77,5 @@ func (p *androidPanelImpl) focus() {
 func (p *androidPanelImpl) isFocused() bool {
 	return false
 }
+
+func panelAreaSize(*WebviewWindow) (int, int, bool) { return 0, 0, false }

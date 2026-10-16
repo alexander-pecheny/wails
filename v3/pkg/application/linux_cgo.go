@@ -1244,6 +1244,7 @@ func windowNewWebview(parentId uint, gpuPolicy WebviewGpuPolicy) pointer {
 	C.webkit_user_content_manager_register_script_message_handler(manager, c.String("external"), nil)
 
 	// WebKitGTK 6.0: Create network session first
+	persistCookies()
 	networkSession := C.webkit_network_session_get_default()
 
 	// Create web view with settings
@@ -1817,9 +1818,12 @@ func processWindowEvent(windowID C.uint, eventID C.uint) {
 func onProcessRequest(request *C.WebKitURISchemeRequest, data C.uintptr_t) {
 	webView := C.webkit_uri_scheme_request_get_web_view(request)
 	windowId := uint(C.get_window_id(unsafe.Pointer(webView)))
+	panel, foreign := panelRequestOrigin(unsafe.Pointer(webView))
 	webviewRequests <- &webViewAssetRequest{
-		Request:  webview.NewRequest(unsafe.Pointer(request)),
-		windowId: windowId,
+		Request:         webview.NewRequest(unsafe.Pointer(request)),
+		panel:           panel,
+		foreignDocument: foreign,
+		windowId:        windowId,
 		windowName: func() string {
 			if window, ok := globalApplication.Window.GetByID(windowId); ok {
 				return window.Name()

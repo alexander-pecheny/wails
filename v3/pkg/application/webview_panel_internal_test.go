@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/wailsapp/wails/v3/internal/assetserver/webview"
 )
 
 type panelProbe struct {
@@ -240,21 +242,21 @@ func TestPanelAnchorBaselineAndClamping(t *testing.T) {
 	window := &WebviewWindow{options: WebviewWindowOptions{Width: 800, Height: 600}}
 	panel := window.NewPanel(WebviewPanelOptions{X: 10, Y: 20, Width: 300, Height: 200, Anchor: AnchorFill})
 	panel.initializeAnchor()
-	panel.handleWindowResize(900, 650)
+	panel.resizeTo(900, 650)
 	want := Rect{X: 10, Y: 20, Width: 400, Height: 250}
 	if got := panel.Bounds(); got != want {
 		t.Fatalf("resize: %+v, want %+v", got, want)
 	}
-	panel.handleWindowResize(800, 600)
+	panel.resizeTo(800, 600)
 	if got := panel.Bounds(); got != (Rect{X: 10, Y: 20, Width: 300, Height: 200}) {
 		t.Fatalf("resize drift: %+v", got)
 	}
 	panel.SetBounds(Rect{X: 50, Y: 60, Width: 200, Height: 100})
-	panel.handleWindowResize(900, 650)
+	panel.resizeTo(900, 650)
 	if got := panel.Bounds(); got != (Rect{X: 50, Y: 60, Width: 300, Height: 150}) {
 		t.Fatalf("manual baseline ignored: %+v", got)
 	}
-	panel.handleWindowResize(1, 1)
+	panel.resizeTo(1, 1)
 	if got := panel.Bounds(); got.Width != 1 || got.Height != 1 {
 		t.Fatalf("negative native dimensions: %+v", got)
 	}
@@ -339,8 +341,87 @@ func TestPanelSingleEdgeAnchoring(t *testing.T) {
 	window := &WebviewWindow{options: WebviewWindowOptions{Width: 800, Height: 600}}
 	panel := window.NewPanel(WebviewPanelOptions{X: 600, Y: 400, Width: 100, Height: 100, Anchor: AnchorRight | AnchorBottom})
 	panel.initializeAnchor()
-	panel.handleWindowResize(900, 650)
+	panel.resizeTo(900, 650)
 	if got := panel.Bounds(); got != (Rect{X: 700, Y: 450, Width: 100, Height: 100}) {
 		t.Fatalf("single edge changed dimensions: %+v", got)
+	}
+}
+
+type blockingDestroyProbe struct {
+	webviewPanelImpl
+	entered, release chan struct{}
+}
+
+func (p *blockingDestroyProbe) destroy() {
+	close(p.entered)
+	<-p.release
+}
+
+func TestPanelNameReusableWhileDestroying(t *testing.T) {
+	panelTestApp(t, true)
+	window := &WebviewWindow{}
+	old := window.NewPanel(WebviewPanelOptions{Name: "tab"})
+	probe := &blockingDestroyProbe{entered: make(chan struct{}), release: make(chan struct{})}
+	old.impl = probe
+	done := make(chan struct{})
+	go func() { old.Destroy(); close(done) }()
+	<-probe.entered
+	fresh := window.NewPanel(WebviewPanelOptions{Name: "tab"})
+	close(probe.release)
+	<-done
+	if fresh == old || fresh.isDestroyed() {
+		t.Fatal("NewPanel returned the panel being destroyed")
+	}
+	if window.GetPanel("tab") != fresh {
+		t.Fatal("fresh panel is not registered")
+	}
+}
+
+type urlOnlyRequest struct {
+	webview.Request
+	url string
+}
+
+func (r urlOnlyRequest) URL() (string, error) { return r.url, nil }
+
+func TestPanelRequestGate(t *testing.T) {
+	for _, tc := range []struct {
+		url            string
+		panel, foreign bool
+		wantRefused    bool
+	}{
+		{url: "wails://localhost/wails/runtime", wantRefused: false},
+		{url: "wails://localhost/index.html", panel: true, wantRefused: false},
+		{url: "wails://localhost/api/boards", panel: true, wantRefused: false},
+		{url: "wails://localhost/wails/runtime", panel: true, wantRefused: true},
+		{url: "http://wails.localhost/wails/runtime.js", panel: true, wantRefused: true},
+		{url: "wails://localhost/index.html", panel: true, foreign: true, wantRefused: true},
+	} {
+		r := &webViewAssetRequest{Request: urlOnlyRequest{url: tc.url}, panel: tc.panel, foreignDocument: tc.foreign}
+		if got := r.refused(); got != tc.wantRefused {
+			t.Errorf("%s panel=%v foreign=%v: refused=%v, want %v", tc.url, tc.panel, tc.foreign, got, tc.wantRefused)
+		}
+	}
+}
+
+func TestPanelCredentialsOnlyOverSafeSchemes(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"https://xy.example/":           true,
+		"wails://localhost/index.html":  true,
+		"http://wails.localhost/a.html": true,
+		"http://xy.example/":            false,
+		"http://wails.localhost.evil/":  false,
+		"file:///etc/passwd":            false,
+	} {
+		if got := credentialsSafeFor(raw); got != want {
+			t.Errorf("%s: %v, want %v", raw, got, want)
+		}
+	}
+}
+
+func TestPanelDropsCredentialHeadersOverHTTP(t *testing.T) {
+	panel := NewPanel(WebviewPanelOptions{URL: "http://xy.example/", Headers: map[string]string{"authorization": "Bearer x", "X-Trace": "1"}})
+	if _, ok := panel.options.Headers["authorization"]; ok || panel.options.Headers["X-Trace"] != "1" {
+		t.Fatalf("headers: %v", panel.options.Headers)
 	}
 }

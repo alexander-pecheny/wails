@@ -2016,6 +2016,8 @@ func (w *WebviewWindow) SnapAssist() {
 //		URL:    "https://example.com",
 //	})
 func (w *WebviewWindow) NewPanel(options WebviewPanelOptions) *WebviewPanel {
+	// Bounds given now are relative to the area as it is now.
+	areaWidth, areaHeight := w.panelArea()
 	w.panelsLock.Lock()
 	if w.panelsClosed || w.isDestroyed() {
 		w.panelsLock.Unlock()
@@ -2023,7 +2025,7 @@ func (w *WebviewWindow) NewPanel(options WebviewPanelOptions) *WebviewPanel {
 	}
 	if options.Name != "" {
 		for _, panel := range w.panels {
-			if panel.name == options.Name {
+			if panel.name == options.Name && !panel.isDestroyed() {
 				w.panelsLock.Unlock()
 				return panel
 			}
@@ -2041,6 +2043,7 @@ func (w *WebviewWindow) NewPanel(options WebviewPanelOptions) *WebviewPanel {
 		panel.options.Name = panel.name
 	}
 	panel.parent = w
+	panel.originalWindowWidth, panel.originalWindowHeight = areaWidth, areaHeight
 	if w.panels == nil {
 		w.panels = make(map[uint]*WebviewPanel)
 	}
@@ -2161,11 +2164,8 @@ func (w *WebviewWindow) handlePanelResize() {
 		return
 	}
 
-	// Get new window size
-	newWidth, newHeight := w.Size()
-
 	for _, panel := range panels {
-		panel.handleWindowResize(newWidth, newHeight)
+		panel.handleWindowResize()
 	}
 }
 

@@ -355,6 +355,11 @@ type webViewAssetRequest struct {
 	Request    webview.Request
 	windowId   uint
 	windowName string
+	// panel marks a request from an embedded WebviewPanel. foreignDocument marks
+	// one whose page is not served by the asset server, such as an external
+	// site loaded in a panel.
+	panel           bool
+	foreignDocument bool
 }
 
 var windowKeyEvents = make(chan *windowKeyEvent, 5)
@@ -873,6 +878,11 @@ func (a *App) handleWebViewRequest(request *webViewAssetRequest) {
 	// Log that we're processing the request
 	url, _ := request.Request.URL()
 	a.debug("handleWebViewRequest: Processing request", "url", url)
+	if request.refused() {
+		a.debug("handleWebViewRequest: Refused panel request", "url", url)
+		refuse(request)
+		return
+	}
 	// IMPORTANT: pass the wrapper request so our injected headers (x-wails-window-id/name) are used
 	a.assets.ServeWebViewRequest(request)
 	a.debug("handleWebViewRequest: Request processing complete", "url", url)

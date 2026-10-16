@@ -12,18 +12,81 @@ package application
 #include <webkit2/webkit2.h>
 #endif
 #include <stdlib.h>
+#include <string.h>
+
+#if GTK_MAJOR_VERSION >= 4
+extern gboolean handleKeyPressed(GtkEventControllerKey*, guint, guint, GdkModifierType, uintptr_t);
+#else
+extern gboolean onKeyPressEvent(GtkWidget*, GdkEventKey*, uintptr_t);
+#endif
+extern gboolean handlePermissionRequest(WebKitWebView*, WebKitPermissionRequest*, uintptr_t);
 
 static gboolean embedded_panel_position(GtkOverlay *overlay, GtkWidget *widget, GdkRectangle *allocation, gpointer data) {
  GdkRectangle *bounds = g_object_get_data(G_OBJECT(widget), "wails-panel-bounds");
  if (!bounds) return FALSE;
+ // Returning TRUE skips the overlay's own handler, which is what measures.
+ gtk_widget_get_preferred_size(widget, NULL, NULL);
  *allocation = *bounds;
  return TRUE;
+}
+
+static gboolean embedded_panel_is_file(WebKitURIRequest *request) {
+ const char *uri = webkit_uri_request_get_uri(request);
+ return uri && g_str_has_prefix(uri, "file:");
+}
+
+// A link that wants a new window opens in the system browser. A file dropped
+// on the panel must not replace the page.
+static gboolean embedded_panel_policy(WebKitWebView *view, WebKitPolicyDecision *decision, WebKitPolicyDecisionType type, gpointer data) {
+ if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION && type != WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) return FALSE;
+ WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(WEBKIT_NAVIGATION_POLICY_DECISION(decision));
+ WebKitURIRequest *request = webkit_navigation_action_get_request(action);
+ if (type == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) {
+  const char *uri = webkit_uri_request_get_uri(request);
+  if (uri && !embedded_panel_is_file(request)) g_app_info_launch_default_for_uri(uri, NULL, NULL);
+  webkit_policy_decision_ignore(decision);
+  return TRUE;
+ }
+ if (embedded_panel_is_file(request)) {
+  webkit_policy_decision_ignore(decision);
+  return TRUE;
+ }
+ return FALSE;
+}
+
+static GtkWidget* embedded_panel_create(WebKitWebView *view, WebKitNavigationAction *action, gpointer data) {
+ WebKitURIRequest *request = webkit_navigation_action_get_request(action);
+ const char *uri = webkit_uri_request_get_uri(request);
+ if (uri && !embedded_panel_is_file(request)) g_app_info_launch_default_for_uri(uri, NULL, NULL);
+ return NULL;
+}
+
+// The size of the area panels are positioned in: the main webview's.
+static void embedded_panel_area(GtkWidget *main, int *width, int *height) {
+#if GTK_MAJOR_VERSION >= 4
+ *width = gtk_widget_get_width(main);
+ *height = gtk_widget_get_height(main);
+#else
+ *width = gtk_widget_get_allocated_width(main);
+ *height = gtk_widget_get_allocated_height(main);
+#endif
+}
+
+static gboolean embedded_panel_foreign(WebKitWebView *view) {
+ const char *uri = webkit_web_view_get_uri(view);
+ return !uri || !g_str_has_prefix(uri, "wails:");
+}
+
+static gboolean embedded_panel_is_panel(WebKitWebView *view) {
+ return g_object_get_data(G_OBJECT(view), "wails-panel") != NULL;
 }
 
 // Wrap only the main webview, preserving the menu and content-area coordinates.
 static GtkWidget* embedded_panel_overlay(GtkWidget *main, GtkWidget *box) {
  GtkWidget *parent = gtk_widget_get_parent(main);
  if (GTK_IS_OVERLAY(parent)) return parent;
+ // Moving the webview drops its keyboard focus.
+ gboolean focused = gtk_widget_has_focus(main);
  GtkWidget *overlay = gtk_overlay_new();
  g_object_ref(main);
 #if GTK_MAJOR_VERSION >= 4
@@ -41,6 +104,7 @@ static GtkWidget* embedded_panel_overlay(GtkWidget *main, GtkWidget *box) {
  g_signal_connect(overlay, "get-child-position", G_CALLBACK(embedded_panel_position), NULL);
  gtk_widget_set_visible(overlay, TRUE);
  gtk_widget_set_visible(main, TRUE);
+ if (focused) gtk_widget_grab_focus(main);
  return overlay;
 }
 
@@ -49,11 +113,30 @@ static GtkWidget* embedded_panel_new(GtkWidget *main, unsigned int windowID) {
  GtkWidget *view = g_object_new(WEBKIT_TYPE_WEB_VIEW, "web-context", context, NULL);
  // The shared context already has Wails' local asset scheme registered.
  g_object_set_data(G_OBJECT(view), "windowid", GUINT_TO_POINTER(windowID));
-#if GTK_MAJOR_VERSION < 4
+ g_object_set_data(G_OBJECT(view), "wails-panel", GINT_TO_POINTER(1));
+ WebKitSettings *mainSettings = webkit_web_view_get_settings(WEBKIT_WEB_VIEW(main));
+ webkit_settings_set_hardware_acceleration_policy(webkit_web_view_get_settings(WEBKIT_WEB_VIEW(view)),
+  webkit_settings_get_hardware_acceleration_policy(mainSettings));
+ gpointer winID = (gpointer)(uintptr_t)windowID;
+#if GTK_MAJOR_VERSION >= 4
+ GtkEventController *keys = gtk_event_controller_key_new();
+ gtk_widget_add_controller(view, keys);
+ g_signal_connect(keys, "key-pressed", G_CALLBACK(handleKeyPressed), winID);
+#else
+ g_signal_connect(view, "key-press-event", G_CALLBACK(onKeyPressEvent), winID);
  // Parent show_all must not undo an explicitly hidden panel.
  gtk_widget_set_no_show_all(view, TRUE);
 #endif
+ g_signal_connect(view, "permission-request", G_CALLBACK(handlePermissionRequest), winID);
+ g_signal_connect(view, "decide-policy", G_CALLBACK(embedded_panel_policy), NULL);
+ g_signal_connect(view, "create", G_CALLBACK(embedded_panel_create), NULL);
  return view;
+}
+
+static void embedded_panel_hide(GtkWidget *view, GtkWidget *main) {
+ gboolean focused = gtk_widget_has_focus(view);
+ gtk_widget_set_visible(view, FALSE);
+ if (focused) gtk_widget_grab_focus(main);
 }
 static void embedded_panel_bounds(GtkWidget *view, int x, int y, int width, int height) {
  GdkRectangle *bounds = g_new(GdkRectangle, 1);
@@ -113,6 +196,7 @@ func (p *linuxPanelImpl) create() {
 	p.overlay = C.embedded_panel_overlay((*C.GtkWidget)(p.parent.webview), (*C.GtkWidget)(p.parent.vbox))
 	p.webview = C.embedded_panel_new((*C.GtkWidget)(p.parent.webview), C.uint(p.panel.parent.id))
 	C.gtk_overlay_add_overlay((*C.GtkOverlay)(unsafe.Pointer(p.overlay)), p.webview)
+	C.gtk_overlay_set_clip_overlay((*C.GtkOverlay)(unsafe.Pointer(p.overlay)), p.webview, 1)
 	p.setBounds(Rect{X: options.X, Y: options.Y, Width: options.Width, Height: options.Height})
 	settings := C.webkit_web_view_get_settings(p.view())
 	enabled := globalApplication.isDebugMode
@@ -205,7 +289,7 @@ func (p *linuxPanelImpl) show() {
 }
 func (p *linuxPanelImpl) hide() {
 	if p.webview != nil {
-		C.gtk_widget_set_visible(p.webview, 0)
+		C.embedded_panel_hide(p.webview, (*C.GtkWidget)(p.parent.webview))
 	}
 }
 func (p *linuxPanelImpl) isVisible() bool {
@@ -234,4 +318,24 @@ func (p *linuxPanelImpl) focus() {
 }
 func (p *linuxPanelImpl) isFocused() bool {
 	return p.webview != nil && C.gtk_widget_has_focus(p.webview) != 0
+}
+
+func panelAreaSize(w *WebviewWindow) (int, int, bool) {
+	parent, ok := w.impl.(*linuxWebviewWindow)
+	if !ok || parent.webview == nil {
+		return 0, 0, false
+	}
+	var width, height C.int
+	C.embedded_panel_area((*C.GtkWidget)(parent.webview), &width, &height)
+	return int(width), int(height), width > 0 && height > 0
+}
+
+// panelRequestOrigin tells a panel's requests apart, and among them those made
+// by a page that the asset server did not serve.
+func panelRequestOrigin(webView unsafe.Pointer) (panel, foreign bool) {
+	view := (*C.WebKitWebView)(webView)
+	if C.embedded_panel_is_panel(view) == 0 {
+		return false, false
+	}
+	return true, C.embedded_panel_foreign(view) != 0
 }
