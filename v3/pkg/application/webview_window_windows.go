@@ -86,6 +86,8 @@ type windowsWebviewWindow struct {
 	contentProtectionApplied bool
 
 	focusingChromium bool
+	// lastFocusedPanel is the panel that had focus when the window last lost it.
+	lastFocusedPanel *windowsPanelImpl
 	onceDo           sync.Once
 
 	// Window move debouncer
@@ -1696,6 +1698,7 @@ func (w *windowsWebviewWindow) WndProc(msg uint32, wparam, lparam uintptr) uintp
 	switch msg {
 	case w32.WM_ACTIVATE:
 		if int(wparam&0xffff) == w32.WA_INACTIVE {
+			w.rememberPanelFocus()
 			w.parent.emit(events.Windows.WindowInactive)
 		}
 		if wparam == w32.WA_ACTIVE {
@@ -1752,6 +1755,7 @@ func (w *windowsWebviewWindow) WndProc(msg uint32, wparam, lparam uintptr) uintp
 		w.parent.emit(events.Windows.WindowKillFocus)
 	case w32.WM_ENTERSIZEMOVE:
 		// This is needed to close open dropdowns when moving the window https://github.com/MicrosoftEdge/WebView2Feedback/issues/2290
+		w.rememberPanelFocus()
 		w32.SetFocus(w.hwnd)
 		if int(w32.GetKeyState(w32.VK_LBUTTON))&(0x8000) != 0 {
 			// Left mouse button is down - window is being moved
@@ -1767,10 +1771,13 @@ func (w *windowsWebviewWindow) WndProc(msg uint32, wparam, lparam uintptr) uintp
 			w.parent.emit(events.Windows.WindowEndResize)
 		}
 	case w32.WM_SETFOCUS:
-		w.focus()
+		if !w.focusLastPanel() {
+			w.focus()
+		}
 		w.parent.emit(events.Windows.WindowSetFocus)
 	case w32.WM_MOVE, w32.WM_MOVING:
 		_ = w.chromium.NotifyParentWindowPositionChanged()
+		w.notifyPanelsMoved()
 		w.moveDebouncer(func() {
 			w.parent.emit(events.Windows.WindowDidMove)
 		})
@@ -2462,6 +2469,30 @@ func (w *windowsWebviewWindow) setupChromiumConfigError(recovering bool, err err
 	return false
 }
 
+// applyPermissions gives a WebView this window's permission policy.
+func (w *windowsWebviewWindow) applyPermissions(chromium *edge.Chromium) {
+	opts := w.parent.options.Windows
+	// Apply the cross-platform Permissions map first; the WebView2-specific
+	// Windows.Permissions map below can override individual kinds.
+	for permission, state := range w.parent.options.Permissions {
+		chromium.SetPermission(crossPermissionToWebView2Kind(permission),
+			edge.CoreWebView2PermissionState(state))
+	}
+	for permission, state := range opts.Permissions {
+		chromium.SetPermission(edge.CoreWebView2PermissionKind(permission),
+			edge.CoreWebView2PermissionState(state))
+	}
+	// WebView2's PermissionRequested handler checks the global permission
+	// before the per-kind map, so the blanket "allow all" must only be set
+	// when no per-kind policy is configured — otherwise it would override the
+	// Permissions map and a configured PermissionDeny would be ignored. When a
+	// policy is present, unset kinds fall through to PermissionDefault (the
+	// platform's native prompt).
+	if len(w.parent.options.Permissions) == 0 && len(opts.Permissions) == 0 {
+		chromium.SetGlobalPermission(edge.CoreWebView2PermissionStateAllow)
+	}
+}
+
 func (w *windowsWebviewWindow) setupChromium(recovering bool) (ready bool) {
 	chromium := w.chromium
 	defer func() {
@@ -2508,20 +2539,7 @@ func (w *windowsWebviewWindow) setupChromium(recovering bool) (ready bool) {
 	chromium.DataPath = globalApplication.options.Windows.WebviewUserDataPath
 	chromium.BrowserPath = globalApplication.options.Windows.WebviewBrowserPath
 
-	// Apply the cross-platform Permissions map first; the WebView2-specific
-	// Windows.Permissions map below can override individual kinds.
-	hasPermissionPolicy := len(w.parent.options.Permissions) > 0 || len(opts.Permissions) > 0
-	for permission, state := range w.parent.options.Permissions {
-		chromium.SetPermission(crossPermissionToWebView2Kind(permission),
-			edge.CoreWebView2PermissionState(state))
-	}
-
-	if opts.Permissions != nil {
-		for permission, state := range opts.Permissions {
-			chromium.SetPermission(edge.CoreWebView2PermissionKind(permission),
-				edge.CoreWebView2PermissionState(state))
-		}
-	}
+	w.applyPermissions(chromium)
 
 	chromium.MessageCallback = w.processMessage
 	chromium.MessageWithAdditionalObjectsCallback = w.processMessageWithAdditionalObjects
@@ -2705,15 +2723,6 @@ func (w *windowsWebviewWindow) setupChromium(recovering bool) (ready bool) {
 		return w.setupChromiumConfigError(recovering, err)
 	}
 
-	// WebView2's PermissionRequested handler checks the global permission
-	// before the per-kind map, so the blanket "allow all" must only be set
-	// when no per-kind policy is configured — otherwise it would override the
-	// Permissions map and a configured PermissionDeny would be ignored. When a
-	// policy is present, unset kinds fall through to PermissionDefault (the
-	// platform's native prompt).
-	if !hasPermissionPolicy {
-		chromium.SetGlobalPermission(edge.CoreWebView2PermissionStateAllow)
-	}
 	if err := chromium.AddWebResourceRequestedFilterWithError("*", edge.COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL); err != nil {
 		return w.setupChromiumConfigError(recovering, err)
 	}
@@ -3341,6 +3350,7 @@ func (w *windowsWebviewWindow) rebuildWebView() {
 		w.chromium.Close()
 		w.chromium = w.newChromium()
 		if w.setupChromium(true) {
+			w.rebuildPanels()
 			return
 		}
 		if !w.beginWebviewRecovery() {

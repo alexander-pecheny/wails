@@ -42,8 +42,18 @@ func (w *windowsWebviewWindow) startRequestCancellation(ready func()) {
 		ready()
 		return
 	}
-	c := &windowsRequestCancellation{chromium: w.chromium, tracker: webview.NewRequestTracker(globalApplication.Context())}
+	c := newRequestCancellation(w.chromium)
 	w.requestCancellation = c
+	c.start(func() bool { return !w.parent.isDestroyed() }, ready)
+}
+
+func newRequestCancellation(chromium requestCancellationDevTools) *windowsRequestCancellation {
+	return &windowsRequestCancellation{chromium: chromium, tracker: webview.NewRequestTracker(globalApplication.Context())}
+}
+
+// start configures the WebView's CDP sessions and then calls ready, also when
+// cancellation is unavailable, while alive reports true.
+func (c *windowsRequestCancellation) start(alive func() bool, ready func()) {
 	done := func(err error) {
 		if c.closed {
 			return
@@ -52,7 +62,7 @@ func (w *windowsWebviewWindow) startRequestCancellation(ready func()) {
 			globalApplication.error("Windows request cancellation unavailable: %v", err)
 			c.close()
 		}
-		if !w.parent.isDestroyed() {
+		if alive() {
 			ready()
 		}
 	}

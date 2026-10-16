@@ -100,11 +100,14 @@ type Chromium struct {
 	ContainsFullScreenElementChangedCallback func(sender *ICoreWebView2, args *ICoreWebView2ContainsFullScreenElementChangedEventArgs)
 	AcceleratorKeyCallback                   func(uint) bool
 	CursorChangedCallback                    func(cursor HCURSOR, systemCursorID uint32)
+	// NewWindowRequestedCallback is registered only when set before embedding.
+	NewWindowRequestedCallback func(args *ICoreWebView2NewWindowRequestedEventArgs)
 
 	// Error handling
 	globalErrorCallback func(error)
 
 	shuttingDown bool
+	cancelled    func() bool
 
 	// Resize debouncing
 	lastBounds  *w32.Rect
@@ -172,6 +175,7 @@ func (e *Chromium) ShuttingDown() {
 	e.ContainsFullScreenElementChangedCallback = nil
 	e.AcceleratorKeyCallback = nil
 	e.CursorChangedCallback = nil
+	e.NewWindowRequestedCallback = nil
 	e.globalErrorCallback = globalErrorHandler
 }
 
@@ -268,6 +272,48 @@ func (e *Chromium) EmbedWithError(hwnd uintptr) (err error) {
 	return nil
 }
 
+// ErrEmbedCancelled reports that EmbedWithEnvironment stopped because its
+// cancelled function returned true.
+var ErrEmbedCancelled = errors.New("WebView2 initialisation was cancelled")
+
+// EmbedWithEnvironment creates a controller in an environment that another
+// Chromium created, so both share its browser process, profile and browser
+// arguments. The message pump stops early once cancelled returns true. Like
+// EmbedWithError, a failed instance cannot be reused.
+func (e *Chromium) EmbedWithEnvironment(hwnd uintptr, env *ICoreWebView2Environment, cancelled func() bool) (err error) {
+	defer func() {
+		if err != nil {
+			e.Close()
+		}
+	}()
+	if env == nil {
+		return errors.New("webview2 environment is not initialized")
+	}
+	e.hwnd = hwnd
+	e.CompositionControllerEnabled = false
+	e.webview2RuntimeVersion, err = webviewloader.GetAvailableCoreWebView2BrowserVersionString(e.BrowserPath)
+	if err != nil {
+		return fmt.Errorf("error getting Webview2 runtime version: %w", err)
+	}
+	env.AddRef()
+	e.environment = env
+	if err = env.CreateCoreWebView2Controller(hwnd, e.controllerCompleted); err != nil {
+		return err
+	}
+	e.cancelled = cancelled
+	defer func() { e.cancelled = nil }()
+	if !e.pumpUntilInited(embedTimeout) {
+		if e.initErr != nil {
+			return e.initErr
+		}
+		if cancelled != nil && cancelled() {
+			return ErrEmbedCancelled
+		}
+		return fmt.Errorf("WebView2 controller did not complete initialisation within %s", embedTimeout)
+	}
+	return nil
+}
+
 // Initialization callbacks return to the message pump, which reports the first
 // failure to EmbedWithError. They must stop before using incomplete COM objects.
 func (e *Chromium) initializationFailed(err error) uintptr {
@@ -290,7 +336,7 @@ func (e *Chromium) pumpUntilInited(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 
 	for {
-		if e.initErr != nil || e.shuttingDown {
+		if e.initErr != nil || e.shuttingDown || (e.cancelled != nil && e.cancelled()) {
 			return false
 		}
 		if atomic.LoadUintptr(&e.inited) != 0 {
@@ -692,6 +738,11 @@ func (e *Chromium) initializeController(controller *ICoreWebView2Controller) uin
 			return e.initializationFailed(err)
 		}
 	}
+	if e.NewWindowRequestedCallback != nil {
+		if err := e.addNewWindowRequested(); err != nil {
+			return e.initializationFailed(err)
+		}
+	}
 
 	atomic.StoreUintptr(&e.inited, 1)
 
@@ -862,8 +913,31 @@ func (e *Chromium) AddWebResourceRequestedFilterWithError(filter string, ctx COR
 	return e.webview.AddWebResourceRequestedFilter(filter, ctx)
 }
 
+// RemoveWebResourceRequestedFilterWithError removes a filter added with the same arguments.
+func (e *Chromium) RemoveWebResourceRequestedFilterWithError(filter string, ctx COREWEBVIEW2_WEB_RESOURCE_CONTEXT) error {
+	if e.webview == nil {
+		return errors.New("webview2 is not initialized")
+	}
+	return e.webview.RemoveWebResourceRequestedFilter(filter, ctx)
+}
+
 func (e *Chromium) Environment() *ICoreWebView2Environment {
 	return e.environment
+}
+
+// Source returns the URL of the top-level document.
+func (e *Chromium) Source() (string, error) {
+	if e.webview == nil {
+		return "", errors.New("webview2 is not initialized")
+	}
+	return e.webview.GetSource()
+}
+
+func (e *Chromium) Reload() error {
+	if e.webview == nil || e.shuttingDown {
+		return nil
+	}
+	return e.webview.Reload()
 }
 
 // AcceleratorKeyPressed is called when an accelerator key is pressed.

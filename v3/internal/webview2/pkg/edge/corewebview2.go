@@ -686,3 +686,27 @@ func (i *ICoreWebView2) OpenDevToolsWindow() error {
 	}
 	return nil
 }
+
+func (i *ICoreWebView2) RemoveWebResourceRequestedFilter(uri string, resourceContext COREWEBVIEW2_WEB_RESOURCE_CONTEXT) error {
+	_uri, err := windows.UTF16PtrFromString(uri)
+	if err != nil {
+		return err
+	}
+	hr, _, _ := i.vtbl.RemoveWebResourceRequestedFilter.Call(
+		uintptr(unsafe.Pointer(i)),
+		uintptr(unsafe.Pointer(_uri)),
+		uintptr(resourceContext),
+	)
+	if windows.Handle(hr) != windows.S_OK {
+		return windows.Errno(hr)
+	}
+	return nil
+}
+
+func (i *ICoreWebView2) Reload() error {
+	hr, _, _ := i.vtbl.Reload.Call(uintptr(unsafe.Pointer(i)))
+	if windows.Handle(hr) != windows.S_OK {
+		return windows.Errno(hr)
+	}
+	return nil
+}
