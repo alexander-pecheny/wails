@@ -432,7 +432,7 @@ func (p *darwinPanelImpl) load(target string, headers []byte) {
 		defer C.free(unsafe.Pointer(rawHeaders))
 	}
 	if !C.panelLoadURL(p.webview, uri, rawHeaders) {
-		globalApplication.error("panel URL is not valid", "panel", p.panel.name, "url", target)
+		globalApplication.error("panel %s: URL is not valid: %s", p.panel.name, target)
 	}
 }
 

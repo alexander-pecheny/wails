@@ -37,4 +37,7 @@ jobs:
       - name: Smoke test (Xvfb)
         if: runner.os == 'Linux'
         run: xvfb-run -a go run ./test/manual/webview-panel
+        env:
+          # The runner's AppArmor forbids the user namespaces WebKit's sandbox needs.
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
         timeout-minutes: 5
