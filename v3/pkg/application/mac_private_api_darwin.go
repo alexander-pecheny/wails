@@ -117,6 +117,32 @@ void wailsPrivateEnableWebInspector(void *window) {
 		NSLog(@"[Wails] Could not enable developer extras: %@", exception.reason);
 	}
 }
+
+void wailsPrivateOpenWebviewInspector(void *webView) {
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 120000
+	if (@available(macOS 12.0, *)) {
+		WKWebView *view = (WKWebView *)webView;
+		dispatch_async(dispatch_get_main_queue(), ^{
+			@try {
+				[view._inspector show];
+			} @catch (NSException *exception) {
+				NSLog(@"Opening the inspector failed: %@", exception.reason);
+			}
+		});
+	}
+#else
+	NSLog(@"Opening the inspector needs at least macOS 12");
+#endif
+}
+
+void wailsPrivateEnableWebviewInspector(void *webView) {
+	WKWebView *view = (WKWebView *)webView;
+	@try {
+		[view.configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+	} @catch (NSException *exception) {
+		NSLog(@"[Wails] Could not enable developer extras: %@", exception.reason);
+	}
+}
 #endif
 */
 import "C"

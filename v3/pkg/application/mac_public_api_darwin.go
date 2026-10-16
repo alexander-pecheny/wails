@@ -72,6 +72,14 @@ void wailsPrivateOpenWebInspector(void *window) {
 void wailsPrivateEnableWebInspector(void *window) {
     (void)window;
 }
+
+void wailsPrivateOpenWebviewInspector(void *webView) {
+    (void)webView;
+}
+
+void wailsPrivateEnableWebviewInspector(void *webView) {
+    (void)webView;
+}
 #endif
 */
 import "C"

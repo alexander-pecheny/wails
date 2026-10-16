@@ -3,26 +3,24 @@
 package application
 
 /*
-#cgo CFLAGS: -x objective-c
+#cgo CFLAGS: -mmacosx-version-min=10.13 -x objective-c -DWAILS_MAC_DEVTOOLS
+#cgo LDFLAGS: -framework Cocoa -framework WebKit
+
 #import <WebKit/WebKit.h>
-static void embeddedPanelDevTools(void* panel, bool enabled) {
- WKWebView* view = (WKWebView*)panel;
- [view.configuration.preferences setValue:@(enabled) forKey:@"developerExtrasEnabled"];
-}
-static void embeddedPanelInspector(void* panel) {
- WKWebView* view = (WKWebView*)panel;
- @try {
-  id inspector = [view valueForKey:@"_inspector"];
-  if ([inspector respondsToSelector:@selector(show)]) [inspector performSelector:@selector(show)];
- } @catch (NSException* exception) {
-  NSLog(@"Opening panel inspector failed: %@", exception.reason);
- }
+#include "mac_private_api_darwin.h"
+
+static void embeddedPanelEnableDevTools(void* panel) {
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 130300
+	if (@available(macOS 13.3, *)) {
+		((WKWebView*)panel).inspectable = YES;
+		return;
+	}
+#endif
+	wailsPrivateEnableWebviewInspector(panel);
 }
 */
 import "C"
 import "unsafe"
 
-func configureEmbeddedPanelDevTools(view unsafe.Pointer, enabled bool) {
-	C.embeddedPanelDevTools(view, C.bool(enabled))
-}
-func openEmbeddedPanelDevTools(view unsafe.Pointer) { C.embeddedPanelInspector(view) }
+func enableEmbeddedPanelDevTools(view unsafe.Pointer) { C.embeddedPanelEnableDevTools(view) }
+func openEmbeddedPanelDevTools(view unsafe.Pointer)   { C.wailsPrivateOpenWebviewInspector(view) }

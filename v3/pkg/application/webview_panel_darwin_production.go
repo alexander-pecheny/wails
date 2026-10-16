@@ -4,5 +4,5 @@ package application
 
 import "unsafe"
 
-func configureEmbeddedPanelDevTools(_ unsafe.Pointer, _ bool) {}
-func openEmbeddedPanelDevTools(_ unsafe.Pointer)              {}
+func enableEmbeddedPanelDevTools(_ unsafe.Pointer) {}
+func openEmbeddedPanelDevTools(_ unsafe.Pointer)   {}

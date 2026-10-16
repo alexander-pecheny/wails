@@ -16,6 +16,8 @@ void wailsPrivateSetGlassGrouping(void *glassView, const char *groupID, double g
 #ifdef WAILS_MAC_DEVTOOLS
 void wailsPrivateOpenWebInspector(void *window);
 void wailsPrivateEnableWebInspector(void *window);
+void wailsPrivateOpenWebviewInspector(void *webView);
+void wailsPrivateEnableWebviewInspector(void *webView);
 #endif
 
 #endif /* WailsMacPrivateAPI_h */
