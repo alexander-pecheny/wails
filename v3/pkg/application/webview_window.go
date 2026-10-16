@@ -206,6 +206,7 @@ type WebviewWindow struct {
 	// Indicates that the window is destroyed
 	destroyed     bool
 	destroyedLock sync.RWMutex
+	closeStarted  atomic.Bool
 
 	runtimeLoaded  bool
 	pendingJS      []string
@@ -371,6 +372,9 @@ func NewWindow(options WebviewWindowOptions) *WebviewWindow {
 
 	// Listen for window closing events and cleanup panels
 	result.OnWindowEvent(events.Common.WindowClosing, func(event *WindowEvent) {
+		if !result.closeStarted.CompareAndSwap(false, true) {
+			return
+		}
 		atomic.StoreUint32(&result.unconditionallyClose, 1)
 		InvokeSync(result.destroyAllPanels)
 		InvokeSync(result.markAsDestroyed)
