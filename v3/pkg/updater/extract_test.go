@@ -26,7 +26,7 @@ func TestMaybeExtract_Zip_AppBundle(t *testing.T) {
 		{name: "MyApp.app/Contents/MacOS/MyApp", body: []byte("binary"), mode: 0o755},
 	})
 
-	out, did, err := maybeExtractInto(archive)
+	out, did, _, err := maybeExtractInto(archive)
 	if err != nil {
 		t.Fatalf("maybeExtractInto: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestMaybeExtract_NonArchive_Passthrough(t *testing.T) {
 	if err := os.WriteFile(staged, []byte("ELF"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, did, err := maybeExtractInto(staged)
+	out, did, _, err := maybeExtractInto(staged)
 	if err != nil {
 		t.Fatalf("maybeExtractInto: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestMaybeExtract_TarGz_FlatBinary(t *testing.T) {
 	writeTarGz(t, archive, []tarEntry{
 		{name: "myapp", body: []byte("ELF"), mode: 0o755},
 	})
-	out, did, err := maybeExtractInto(archive)
+	out, did, _, err := maybeExtractInto(archive)
 	if err != nil {
 		t.Fatalf("maybeExtractInto: %v", err)
 	}
@@ -98,16 +98,24 @@ func TestMaybeExtract_TarGz_FlatBinary(t *testing.T) {
 
 // A zip whose top level contains more than one entry is ambiguous: the
 // helper has nothing meaningful to swap into the single target path.
-func TestMaybeExtract_MultipleTopLevel_Rejected(t *testing.T) {
+func TestMaybeExtract_MultipleTopLevel_IsAMergePayload(t *testing.T) {
 	dir := t.TempDir()
 	archive := filepath.Join(dir, "two.zip")
 	writeZip(t, archive, []zipEntry{
 		{name: "one", body: []byte("a")},
 		{name: "two", body: []byte("b")},
 	})
-	_, _, err := maybeExtractInto(archive)
-	if err == nil || !strings.Contains(err.Error(), "one top-level entry") {
-		t.Fatalf("expected multi-entry rejection, got %v", err)
+	out, did, merge, err := maybeExtractInto(archive)
+	if err != nil || !did || !merge {
+		t.Fatalf("got %q did=%v merge=%v err=%v", out, did, merge, err)
+	}
+	for name, want := range map[string]string{"one": "a", "two": "b"} {
+		if got, err := os.ReadFile(filepath.Join(out, name)); err != nil || string(got) != want {
+			t.Errorf("%s = %q (%v)", name, got, err)
+		}
+	}
+	if _, err := os.Stat(archive); !os.IsNotExist(err) {
+		t.Errorf("the archive was left behind: %v", err)
 	}
 }
 
@@ -119,7 +127,7 @@ func TestMaybeExtract_Zip_SlipRejected(t *testing.T) {
 	writeZip(t, archive, []zipEntry{
 		{name: "../escape.txt", body: []byte("pwned")},
 	})
-	_, _, err := maybeExtractInto(archive)
+	_, _, _, err := maybeExtractInto(archive)
 	if err == nil || !strings.Contains(err.Error(), "escapes root") {
 		t.Fatalf("expected zip-slip rejection, got %v", err)
 	}
@@ -135,7 +143,7 @@ func TestMaybeExtract_Tar_SlipRejected(t *testing.T) {
 	writeTarGz(t, archive, []tarEntry{
 		{name: "../escape", body: []byte("pwned")},
 	})
-	_, _, err := maybeExtractInto(archive)
+	_, _, _, err := maybeExtractInto(archive)
 	if err == nil || !strings.Contains(err.Error(), "escapes root") {
 		t.Fatalf("expected tar-slip rejection, got %v", err)
 	}
@@ -154,7 +162,7 @@ func TestMaybeExtract_Tar_SymlinkEscape_Rejected(t *testing.T) {
 		{name: "bundle/", isDir: true, mode: 0o755},
 		{name: "bundle/link", symlinkTarget: "../../../../etc/passwd"},
 	})
-	_, _, err := maybeExtractInto(archive)
+	_, _, _, err := maybeExtractInto(archive)
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("expected symlink-escape rejection, got %v", err)
 	}
@@ -173,7 +181,7 @@ func TestMaybeExtract_Tar_InternalSymlink_Allowed(t *testing.T) {
 		{name: "bundle/real", body: []byte("payload"), mode: 0o644},
 		{name: "bundle/alias", symlinkTarget: "real"},
 	})
-	out, _, err := maybeExtractInto(archive)
+	out, _, _, err := maybeExtractInto(archive)
 	if err != nil {
 		t.Fatalf("internal symlink rejected: %v", err)
 	}

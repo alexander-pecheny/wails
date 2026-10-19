@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/wailsapp/wails/v3/pkg/updater"
 	"github.com/wailsapp/wails/v3/pkg/updater/internal/semver"
@@ -39,6 +41,11 @@ type Config struct {
 	// Prerelease, when true, walks /repos/{r}/releases (which includes
 	// prereleases) instead of /repos/{r}/releases/latest (which doesn't).
 	Prerelease bool
+
+	// TagPrefix, when set, picks the newest release whose tag starts with it,
+	// and the version is the tag without it: a repo that releases several
+	// programs can tag one "app/2026.10.19" and another "server/1.4.0".
+	TagPrefix string
 
 	// BaseURL overrides https://api.github.com. Useful for GitHub Enterprise:
 	// pass "https://<host>/api/v3". Trailing slashes are trimmed.
@@ -114,7 +121,11 @@ func (p *Provider) Name() string { return "github" }
 // Verification block when the publisher ships a checksum sidecar.
 func (p *Provider) Check(ctx context.Context, req updater.CheckRequest) (*updater.Release, error) {
 	endpoint := p.base + "/repos/" + p.cfg.Repository + "/releases/latest"
-	if p.cfg.Prerelease {
+	if p.cfg.TagPrefix != "" {
+		// /releases/latest may be another program's release, so the list is
+		// read instead, and one page reaches far enough back.
+		endpoint = p.base + "/repos/" + p.cfg.Repository + "/releases?per_page=100"
+	} else if p.cfg.Prerelease {
 		// Fetch a small page so we can skip any drafts at the top of the
 		// list. The /releases endpoint includes drafts when the request is
 		// authenticated, and the API does not guarantee the first item is
@@ -128,7 +139,8 @@ func (p *Provider) Check(ctx context.Context, req updater.CheckRequest) (*update
 	if rel == nil {
 		return nil, nil
 	}
-	if !semver.IsNewer(rel.TagName, req.CurrentVersion) {
+	version := semver.TrimPrefix(strings.TrimPrefix(rel.TagName, p.cfg.TagPrefix))
+	if !semver.IsNewer(version, req.CurrentVersion) {
 		return nil, nil
 	}
 
@@ -140,7 +152,7 @@ func (p *Provider) Check(ctx context.Context, req updater.CheckRequest) (*update
 	picked := rel.Assets[idx]
 
 	out := &updater.Release{
-		Version:     semver.TrimPrefix(rel.TagName),
+		Version:     version,
 		Channel:     channelFor(rel),
 		Name:        rel.Name,
 		Notes:       rel.Body,
@@ -292,16 +304,17 @@ func (p *Provider) fetchRelease(ctx context.Context, endpoint string) (*apiRelea
 		return nil, fmt.Errorf("github: api %d: %s", resp.StatusCode, body)
 	}
 
-	if p.cfg.Prerelease {
+	if p.cfg.Prerelease || p.cfg.TagPrefix != "" {
 		var list []apiRelease
 		if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 			return nil, fmt.Errorf("github: decode releases list: %w", err)
 		}
 		for i := range list {
-			if list[i].Draft {
+			r := &list[i]
+			if r.Draft || (r.Prerelease && !p.cfg.Prerelease) || !strings.HasPrefix(r.TagName, p.cfg.TagPrefix) {
 				continue
 			}
-			return &list[i], nil
+			return r, nil
 		}
 		return nil, nil
 	}
@@ -409,7 +422,7 @@ func DefaultAssetMatcher(req updater.CheckRequest, assets []ReleaseAsset) int {
 		if isChecksumName(name) {
 			continue
 		}
-		if plat != "" && !strings.Contains(name, plat) {
+		if plat != "" && !containsPlatform(name, plat) {
 			continue
 		}
 		if arch != "" && !containsArch(name, arch) {
@@ -418,6 +431,26 @@ func DefaultAssetMatcher(req updater.CheckRequest, assets []ReleaseAsset) int {
 		return i
 	}
 	return -1
+}
+
+// platformAliases are the other names a platform's assets are published under.
+// They match whole words of the name only: "win" is inside "darwin".
+var platformAliases = map[string][]string{
+	"darwin":  {"macos", "mac", "osx"},
+	"windows": {"win", "win32", "win64"},
+}
+
+func containsPlatform(name, plat string) bool {
+	if strings.Contains(name, plat) {
+		return true
+	}
+	words := strings.FieldsFunc(name, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	for _, alias := range platformAliases[plat] {
+		if slices.Contains(words, alias) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsArch(name, arch string) bool {

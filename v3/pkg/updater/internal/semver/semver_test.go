@@ -25,6 +25,14 @@ func TestIsNewer(t *testing.T) {
 		{"v1.2.3-rc.2", "v1.2.3-rc.1", true},
 		{"v1.2.3-beta", "v1.2.3-alpha", true},
 
+		// CalVer: a fourth number is a second release of the same day, and
+		// numbers compare as numbers.
+		{"2026.10.19.2", "2026.10.19", true},
+		{"2026.10.19", "2026.10.19.2", false},
+		{"2026.10.19.2", "2026.10.19.2", false},
+		{"2026.11.1", "2026.10.19.2", true},
+		{"2026.10.19", "2026.9.30", true},
+
 		// Build metadata must be ignored.
 		{"v1.2.3+build.1", "v1.2.3", false},
 		{"v1.2.3+build.2", "v1.2.3+build.1", false},

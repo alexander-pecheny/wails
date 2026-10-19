@@ -32,6 +32,8 @@ const (
 	envHelperPID    = "WAILS_UPDATER_HELPER_PID"    // parent PID to wait for
 	envHelperLog    = "WAILS_UPDATER_HELPER_LOG"    // optional log file path
 	envHelperReady  = "WAILS_UPDATER_HELPER_READY"  // readiness status file path
+	envHelperMerge  = "WAILS_UPDATER_HELPER_MERGE"  // "1": NEW is a payload of files to put beside the executable
+	envHelperLaunch = "WAILS_UPDATER_HELPER_LAUNCH" // what to launch after a merge
 )
 
 // HandleHelperMode returns immediately when the current process was not
@@ -66,6 +68,9 @@ func HandleHelperMode() {
 	pid, _ := strconv.Atoi(os.Getenv(envHelperPID))
 	logPath := os.Getenv(envHelperLog)
 
+	if os.Getenv(envHelperMerge) == "1" {
+		os.Exit(runHelperMerge(target, newPath, os.Getenv(envHelperLaunch), pid, logPath, waitForPID, osLauncher{}))
+	}
 	code := runHelperSwap(target, newPath, pid, logPath, waitForPID, osLauncher{})
 	os.Exit(code)
 }
@@ -225,6 +230,96 @@ func runHelperSwap(target, newPath string, parentPID int, logPath string, wait p
 	}
 
 	lg.logf("helper done")
+	return 0
+}
+
+// runHelperMerge is runHelperSwap for a payload of several files: each entry
+// of payload takes the place of its namesake in dir, which is where the
+// executable lives, and launchPath is launched once they all have. A failure
+// puts every replaced file back and relaunches the original.
+func runHelperMerge(dir, payload, launchPath string, parentPID int, logPath string, wait processWaiter, l launcher) int {
+	lg := openHelperLog(logPath)
+	defer lg.Close()
+	lg.logf("helper start (merge): dir=%s payload=%s launch=%s pid=%d", dir, payload, launchPath, parentPID)
+
+	entries, err := os.ReadDir(payload)
+	if err != nil {
+		lg.logf("read payload failed: %v", err)
+		return 11
+	}
+	if parentPID > 0 {
+		if err := wait(parentPID, 30*time.Second); err != nil {
+			lg.logf("parent did not exit within timeout: %v — aborting swap", err)
+			return 17
+		}
+	}
+	clearHelperEnv()
+
+	var placed []string // the entries in place so far, which a failure puts back
+	undo := func() {
+		for _, name := range placed {
+			target := filepath.Join(dir, name)
+			if _, err := os.Stat(target + ".bak"); err == nil {
+				_ = os.RemoveAll(target)
+				if err := os.Rename(target+".bak", target); err != nil {
+					lg.logf("restore %s: %v", name, err)
+				}
+			} else {
+				_ = os.RemoveAll(target)
+			}
+		}
+	}
+	fail := func(code int) int {
+		undo()
+		if err := l.launch(launchPath); err != nil {
+			lg.logf("relaunch original failed: %v", err)
+		}
+		return code
+	}
+
+	for _, e := range entries {
+		target, src := filepath.Join(dir, e.Name()), filepath.Join(payload, e.Name())
+		_ = os.RemoveAll(target + ".bak")
+		var origMode os.FileMode
+		if info, err := os.Stat(target); err == nil {
+			origMode = info.Mode()
+			if err := copyAny(target, target+".bak"); err != nil {
+				lg.logf("backup %s failed: %v", e.Name(), err)
+				return fail(12)
+			}
+		}
+		placed = append(placed, e.Name())
+		swapped := false
+		for i := 0; i < 20 && !swapped; i++ {
+			if err := replaceTarget(target, src); err != nil {
+				lg.logf("replace %s (attempt %d): %v", e.Name(), i+1, err)
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			swapped = true
+		}
+		if !swapped {
+			lg.logf("all swap attempts for %s exhausted — restoring", e.Name())
+			return fail(13)
+		}
+		if origMode != 0 {
+			_ = os.Chmod(target, origMode.Perm())
+		}
+	}
+
+	if err := l.launch(launchPath); err != nil {
+		lg.logf("launch new failed: %v — restoring", err)
+		return fail(15)
+	}
+	for _, name := range placed {
+		_ = os.RemoveAll(filepath.Join(dir, name) + ".bak")
+	}
+	if stagingDir := filepath.Dir(payload); strings.HasPrefix(filepath.Base(stagingDir), "wails-update-") {
+		if err := os.RemoveAll(stagingDir); err != nil {
+			lg.logf("staging cleanup: %v (non-fatal)", err)
+		}
+	}
+	lg.logf("helper done (merge)")
 	return 0
 }
 

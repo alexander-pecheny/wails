@@ -94,7 +94,7 @@ func runLiveArchive(t *testing.T, a liveArchive) {
 	}
 	t.Logf("downloaded %s (%d bytes, SHA256 matches published digest)", a.name, h.Size())
 
-	out, did, err := maybeExtractInto(staged)
+	out, did, _, err := maybeExtractInto(staged)
 	if err != nil {
 		t.Fatalf("extract: %v", err)
 	}

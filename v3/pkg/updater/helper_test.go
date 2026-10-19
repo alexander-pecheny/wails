@@ -307,3 +307,65 @@ func makeAppBundle(t *testing.T, root, payload string) {
 	exe := filepath.Join(root, "Contents", "MacOS", "exe")
 	writeFile(t, exe, []byte(payload))
 }
+
+// TestRunHelperMerge puts every file of the payload beside the executable,
+// adds one the old version did not have, leaves the rest of the folder alone
+// and launches the executable.
+func TestRunHelperMerge_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	app := filepath.Join(dir, "app")
+	payload := filepath.Join(dir, "wails-update-1", "payload")
+	writeFile(t, filepath.Join(app, "app.exe"), []byte("OLD"))
+	writeFile(t, filepath.Join(app, "tool.exe"), []byte("OLD TOOL"))
+	writeFile(t, filepath.Join(app, "notes.txt"), []byte("MINE"))
+	writeFile(t, filepath.Join(payload, "app.exe"), []byte("NEW"))
+	writeFile(t, filepath.Join(payload, "tool.exe"), []byte("NEW TOOL"))
+	writeFile(t, filepath.Join(payload, "LICENSE"), []byte("L"))
+
+	l := &fakeLauncher{}
+	launch := filepath.Join(app, "app.exe")
+	if code := runHelperMerge(app, payload, launch, 0, filepath.Join(dir, "log"), instantWaiter, l); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	for name, want := range map[string]string{"app.exe": "NEW", "tool.exe": "NEW TOOL", "LICENSE": "L", "notes.txt": "MINE"} {
+		if got, err := os.ReadFile(filepath.Join(app, name)); err != nil || string(got) != want {
+			t.Errorf("%s = %q (%v), want %q", name, got, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(app, "app.exe.bak")); !os.IsNotExist(err) {
+		t.Errorf("a backup was left behind: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(payload)); !os.IsNotExist(err) {
+		t.Errorf("the staging dir was left behind: %v", err)
+	}
+	if len(l.calls) != 1 || l.calls[0] != launch {
+		t.Errorf("launched %v", l.calls)
+	}
+}
+
+// TestRunHelperMerge_LaunchFails_RestoresEverything: when the new version
+// will not start, every file is put back, the new one is removed, and the
+// old version is launched again.
+func TestRunHelperMerge_LaunchFails_RestoresEverything(t *testing.T) {
+	dir := t.TempDir()
+	app := filepath.Join(dir, "app")
+	payload := filepath.Join(dir, "wails-update-1", "payload")
+	writeFile(t, filepath.Join(app, "app.exe"), []byte("OLD"))
+	writeFile(t, filepath.Join(payload, "app.exe"), []byte("NEW"))
+	writeFile(t, filepath.Join(payload, "added.dll"), []byte("ADDED"))
+
+	l := &fakeLauncher{errsByCall: []error{errors.New("boom")}}
+	launch := filepath.Join(app, "app.exe")
+	if code := runHelperMerge(app, payload, launch, 0, filepath.Join(dir, "log"), instantWaiter, l); code != 15 {
+		t.Fatalf("exit %d, want 15", code)
+	}
+	if got, _ := os.ReadFile(launch); string(got) != "OLD" {
+		t.Errorf("app.exe = %q, want the old one back", got)
+	}
+	if _, err := os.Stat(filepath.Join(app, "added.dll")); !os.IsNotExist(err) {
+		t.Errorf("the new file stayed: %v", err)
+	}
+	if len(l.calls) != 2 || l.calls[1] != launch {
+		t.Errorf("launched %v, want the old version relaunched", l.calls)
+	}
+}

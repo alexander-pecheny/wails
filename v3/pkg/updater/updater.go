@@ -27,6 +27,7 @@ type Updater struct {
 	current    string // CurrentVersion, snapshot for State()
 	pending    *Release
 	resolved   string // resolved download path (after install)
+	merge      bool   // resolved is a payload of several files (maybeExtractInto)
 	stagingDir string // staging dir beside the target holding resolved, removed on Restart / re-Check
 	lastDigest []byte // digest computed streaming during the last successful download
 	skipped    string // version recorded by SkipVersion / the default window Skip button
@@ -315,7 +316,7 @@ func (u *Updater) DownloadAndInstall(ctx context.Context) error {
 	// macOS distributions ship the .app inside a .zip; without this step the
 	// helper would replace /Applications/MyApp.app (a directory) with the
 	// downloaded .zip (a file). Non-archive artifacts pass through unchanged.
-	finalPath, _, err = maybeExtractInto(finalPath)
+	finalPath, _, merge, err := maybeExtractInto(finalPath)
 	if err != nil {
 		_ = os.RemoveAll(tmpDir)
 		u.transition(StateError)
@@ -325,6 +326,7 @@ func (u *Updater) DownloadAndInstall(ctx context.Context) error {
 
 	u.mu.Lock()
 	u.resolved = finalPath
+	u.merge = merge
 	u.stagingDir = tmpDir
 	u.state = StateReady
 	u.mu.Unlock()
@@ -395,6 +397,7 @@ func (u *Updater) CheckAndInstall(ctx context.Context) error {
 func (u *Updater) Restart(_ context.Context) error {
 	u.mu.RLock()
 	staged := u.resolved
+	merge := u.merge
 	timeout := helperReadyTimeout
 	if u.cfg != nil && u.cfg.HelperReadyTimeout > 0 {
 		timeout = u.cfg.HelperReadyTimeout
@@ -410,6 +413,10 @@ func (u *Updater) Restart(_ context.Context) error {
 	}
 
 	target := bundleTarget(self)
+	if merge {
+		// Several files: each replaces its namesake beside the executable.
+		target = filepath.Dir(self)
+	}
 	// Include PID so concurrent helpers (e.g. test runs, multiple installed
 	// Wails apps updating at the same time) don't truncate each other's logs.
 	logPath := filepath.Join(os.TempDir(), fmt.Sprintf("wails-update-%d.log", os.Getpid()))
@@ -423,7 +430,11 @@ func (u *Updater) Restart(_ context.Context) error {
 		envHelperPID+"="+itoa(os.Getpid()),
 		envHelperLog+"="+logPath,
 		envHelperReady+"="+readyPath,
+		envHelperLaunch+"="+bundleTarget(self),
 	)
+	if merge {
+		env = append(env, envHelperMerge+"=1")
+	}
 
 	cmd := newDetachedCommand(self)
 	cmd.Env = env

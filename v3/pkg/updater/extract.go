@@ -52,27 +52,30 @@ func detectArchive(path string) archiveKind {
 // the archive used to live. The returned newPath either equals stagedPath
 // (non-archive — nothing was done) or names the unpacked entry.
 //
+// An archive with several top-level entries is a set of files that live
+// beside the executable (a Windows app with its tools next to it). Its
+// entries stay together in a payload directory, newPath names that
+// directory, and merge is true: the helper puts each entry in place of its
+// namesake beside the executable.
+//
 // Constraints enforced:
-//   - Exactly one top-level entry. Archives with multiple top-level files or
-//     directories are rejected: the helper has nothing meaningful to swap
-//     into a single target path. Distribute one .app bundle (or one binary)
-//     per artifact.
+//   - At least one top-level entry.
 //   - No path traversal. Entries whose normalised path escapes the extraction
 //     root are rejected (zip-slip).
 //   - No escaping symlinks. Symlinks whose target resolves outside the
 //     extraction root are rejected; in-archive symlinks pointing to sibling
 //     entries are preserved.
 //   - Total uncompressed size and entry count are capped (see constants).
-func maybeExtractInto(stagedPath string) (newPath string, didExtract bool, err error) {
+func maybeExtractInto(stagedPath string) (newPath string, didExtract, merge bool, err error) {
 	kind := detectArchive(stagedPath)
 	if kind == archiveNone {
-		return stagedPath, false, nil
+		return stagedPath, false, false, nil
 	}
 
 	parent := filepath.Dir(stagedPath)
 	scratch, err := os.MkdirTemp(parent, ".payload-*")
 	if err != nil {
-		return "", false, fmt.Errorf("updater: extract scratch dir: %w", err)
+		return "", false, false, fmt.Errorf("updater: extract scratch dir: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(scratch) }
 
@@ -84,35 +87,43 @@ func maybeExtractInto(stagedPath string) (newPath string, didExtract bool, err e
 	}
 	if err != nil {
 		cleanup()
-		return "", false, err
+		return "", false, false, err
 	}
 
 	entries, err := os.ReadDir(scratch)
 	if err != nil {
 		cleanup()
-		return "", false, fmt.Errorf("updater: extract: %w", err)
+		return "", false, false, fmt.Errorf("updater: extract: %w", err)
 	}
-	if len(entries) != 1 {
+	if len(entries) == 0 {
 		cleanup()
-		return "", false, fmt.Errorf("updater: archive must contain exactly one top-level entry, got %d", len(entries))
+		return "", false, false, errors.New("updater: archive is empty")
 	}
-	entry := entries[0]
 
 	// Remove the original archive so the staging dir holds only the extracted
 	// payload — the helper's post-swap cleanup walks one level up.
 	if err := os.Remove(stagedPath); err != nil {
 		cleanup()
-		return "", false, fmt.Errorf("updater: remove staged archive: %w", err)
+		return "", false, false, fmt.Errorf("updater: remove staged archive: %w", err)
 	}
 
-	src := filepath.Join(scratch, entry.Name())
-	dst := filepath.Join(parent, entry.Name())
+	if len(entries) > 1 {
+		payload := filepath.Join(parent, "payload")
+		if err := os.Rename(scratch, payload); err != nil {
+			cleanup()
+			return "", false, false, fmt.Errorf("updater: promote extracted payload: %w", err)
+		}
+		return payload, true, true, nil
+	}
+
+	src := filepath.Join(scratch, entries[0].Name())
+	dst := filepath.Join(parent, entries[0].Name())
 	if err := os.Rename(src, dst); err != nil {
 		cleanup()
-		return "", false, fmt.Errorf("updater: promote extracted entry: %w", err)
+		return "", false, false, fmt.Errorf("updater: promote extracted entry: %w", err)
 	}
 	cleanup()
-	return dst, true, nil
+	return dst, true, false, nil
 }
 
 // extractZip unpacks src into dst. Path traversal, symlink escape, entry
@@ -137,7 +148,10 @@ func extractZip(src, dst string) error {
 	rootClean := filepath.Clean(dst)
 
 	// Pass 1 — directories and regular files. Symlinks recorded for pass 2.
-	type pendingLink struct{ src *zip.File; target string }
+	type pendingLink struct {
+		src    *zip.File
+		target string
+	}
 	var symlinks []pendingLink
 	var written int64
 	for _, f := range zr.File {

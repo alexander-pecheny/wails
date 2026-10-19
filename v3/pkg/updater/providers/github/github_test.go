@@ -403,3 +403,48 @@ func TestCheck_APIError_Surfaced(t *testing.T) {
 func TestProviderInterface(t *testing.T) {
 	var _ updater.Provider = (*github.Provider)(nil)
 }
+
+func TestCheck_TagPrefix_PicksThisProgramsRelease(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		fmt.Fprint(w, `[
+			{"tag_name": "server/9.0.0", "assets": [{"name": "server-macos-arm64.zip"}]},
+			{"tag_name": "app/2026.10.20", "draft": true, "assets": [{"name": "app-macos-arm64.zip"}]},
+			{"tag_name": "app/2026.10.19.2", "assets": [{"name": "app-macos-arm64.zip"}, {"name": "app-windows-x64.zip"}]},
+			{"tag_name": "app/2026.10.19", "assets": [{"name": "app-macos-arm64.zip"}]}
+		]`)
+	}))
+	defer srv.Close()
+	p, _ := github.New(github.Config{Repository: "o/r", BaseURL: srv.URL, TagPrefix: "app/"})
+	rel, err := p.Check(context.Background(), updater.CheckRequest{CurrentVersion: "2026.10.19", Platform: "darwin", Arch: "arm64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel == nil || rel.Version != "2026.10.19.2" || rel.Artifact.Filename != "app-macos-arm64.zip" {
+		t.Fatalf("release = %+v", rel)
+	}
+	if len(paths) != 1 || paths[0] != "/repos/o/r/releases" {
+		t.Errorf("path: %v (want the releases list)", paths)
+	}
+	rel, err = p.Check(context.Background(), updater.CheckRequest{CurrentVersion: "2026.10.19.2", Platform: "windows", Arch: "amd64"})
+	if err != nil || rel != nil {
+		t.Fatalf("an app already on 2026.10.19.2 was offered %+v (%v)", rel, err)
+	}
+}
+
+func TestDefaultAssetMatcher_PlatformAliases(t *testing.T) {
+	assets := []github.ReleaseAsset{{Name: "app-darwin-x64.zip"}, {Name: "app-win-x64.zip"}, {Name: "app-macos-arm64.zip"}}
+	for _, c := range []struct {
+		plat, arch string
+		want       int
+	}{
+		{"windows", "amd64", 1}, // "win" in darwin must not count
+		{"darwin", "arm64", 2},
+		{"darwin", "amd64", 0},
+	} {
+		if got := github.DefaultAssetMatcher(updater.CheckRequest{Platform: c.plat, Arch: c.arch}, assets); got != c.want {
+			t.Errorf("%s/%s: got %d, want %d", c.plat, c.arch, got, c.want)
+		}
+	}
+}

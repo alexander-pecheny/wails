@@ -8,6 +8,7 @@
 package semver
 
 import (
+	"strconv"
 	"strings"
 
 	xsemver "golang.org/x/mod/semver"
@@ -32,8 +33,56 @@ func TrimPrefix(tag string) string {
 //     corresponding release.
 //   - Invalid semver strings are all equal to each other and less than every
 //     valid semver string, matching x/mod/semver's stable behaviour.
+//
+// Two versions that are not both semver but are both dotted runs of numbers
+// (CalVer such as "2026.10.19" and "2026.10.19.2") compare number by number,
+// a missing number counting as zero.
 func Compare(a, b string) int {
-	return xsemver.Compare(canonical(a), canonical(b))
+	ca, cb := canonical(a), canonical(b)
+	if !(xsemver.IsValid(ca) && xsemver.IsValid(cb)) {
+		if na, ok := dotted(TrimPrefix(a)); ok {
+			if nb, ok := dotted(TrimPrefix(b)); ok {
+				return compareDotted(na, nb)
+			}
+		}
+	}
+	return xsemver.Compare(ca, cb)
+}
+
+// dotted reads "2026.10.19.2" as its numbers.
+func dotted(s string) ([]int, bool) {
+	if s == "" {
+		return nil, false
+	}
+	parts := strings.Split(s, ".")
+	out := make([]int, len(parts))
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return nil, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
+
+func compareDotted(a, b []int) int {
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y int
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // IsNewer reports whether tag is strictly newer than current. Returns false
